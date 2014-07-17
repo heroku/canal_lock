@@ -1,0 +1,5 @@
+{application, lock_manager,
+ [{description, "ETS-based lock manager"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications, [kernel, stdlib]}]}.
