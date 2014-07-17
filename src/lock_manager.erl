@@ -1,18 +1,12 @@
 %% TODO: other undefined behavior: lock at 2max, full at 2max, full at 3max too.
 %% That can represent a minimal upwards leak
-%% - Can we use a bucketed approach? If you have a per-entry val, you can
-%%   represent each as a bucket in a homogenous set - this gives the top-val
-%%   leak one chance per bucket, which happens in the manager already, but
-%%   loses the leak chance when resizing, though GC may be needed (do it on call
-%%   if everything is busy but the limit is down?)
-%%   ^-- could this start from a random bucket to have good distribution?
-%%   ^-- this raises the chances of the top-boundary issue while reducing
-%%       the resize risk
-%%   ^-- this handles resizes much nicer
+%%
+%%% N.B. All the buckets are tried sequentially in order for us to minimize the
+%%% amount of work needed to decrement without error.
 -module(lock_manager).
 -behaviour(gen_server).
 
--export([start_link/1, acquire/2, release/2]).
+-export([start_link/1, acquire/3, release/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          code_change/3, terminate/2]).
 
@@ -22,7 +16,6 @@
 
 -define(TABLE, ?MODULE).
 -define(MAX_DECR_TRIES, 15).
--define(MAX_DECR_MOD_TRIES, 10).
 
 start_link(MaxMultiplier) ->
     %% The `MaxMultiplier' value can just be the expected `Max', or an
@@ -31,33 +24,38 @@ start_link(MaxMultiplier) ->
     %% and `X =:= MaxMultiplier'
     gen_server:start_link({local, ?MODULE}, ?MODULE, MaxMultiplier, []).
 
-acquire(Key, Max) ->
+acquire(Key, MaxPer, NumResources) ->
+    acquire(Key, MaxPer, NumResources, 1).
+
+acquire(Key, MaxPer, NumResources, Bucket) ->
     %% Update the counter and get the value as one single write-only operation,
     %% exploiting the {write_concurrency, true} option set on the table.
     %% If we're at `Max+1' value, we failed to acquire the lock.
-    Cap = Max+1,
-    try ets:update_counter(?TABLE, Key, {2,1,Cap,Cap}) of
-        Cap ->
+    Cap = MaxPer+1,
+    try ets:update_counter(?TABLE, {Key,Bucket}, {2,1,Cap,Cap}) of
+        Cap when NumResources =:= Bucket ->
             full;
+        Cap ->
+            acquire(Key, MaxPer, NumResources, Bucket+1);
         _N ->
-            notify_lock(Key),
+            notify_lock(Key, NumResources),
             acquired
     catch
         error:badarg ->
             %% table is either dead, or element not in there.
             %% We try to insert it -- will error if the table isn't there --
             %% and to acquire the lock at the same time to save an operation
-            case ets:insert_new(?TABLE, {Key,1}) of
+            case ets:insert_new(?TABLE, {{Key,Bucket},1}) of
                 true ->
-                    notify_lock(Key),
+                    notify_lock(Key, NumResources),
                     acquired;
                 false ->
                     %% Someone else beat us to it
-                    acquire(Key, Max)
+                    acquire(Key, MaxPer, NumResources, Bucket)
             end
     end.
 
-release(Key, Max) ->
+release(Key, MaxPer, NumResources) ->
     %% TODO: See if this logic needs to be moved inside the lock manager or
     %%       if it can stay out.
     %%
@@ -85,24 +83,22 @@ release(Key, Max) ->
     %% to ensure it finishes, it will need to give up and decrement by two at
     %% some point (where it could then reincrement by one if it sees it's too
     %% low, but that might be too little too late).
-    N = ets:update_counter(?TABLE, Key, {2, -1, 0, 0}),
-    if N =:= Max ->
-            release_loop(Key, Max),
-            notify_unlock(Key);
-       N < Max ->
-            notify_unlock(Key);
-       N > Max ->
-            %% The value might be greater than 'Max' if the conditions have
-            %% changed since the lock was acquired (the max size was shrunk
-            %% down). A confusing case, but we have to handle it.
-            %% We do not need to lower this value more -- the next client to
-            %% try to acquire the lock will apply a ceiling value to it,
-            %% and the next proper release may not decrement it fine.
-            notify_unlock(Key)
-    end.
+    %%
+    %% Because we take a bucketed approach, the same thing may happen from the
+    %% floor position: if you decrement an empty bucket, you'll get a
+    %% value < 0, then need to increment it back, then try the next bucket.
+    %% If another app came in the mean time and grabbed a lock while the counter
+    %% was below 0, it's fine, as one of the reincrements we will eventually
+    %% account for it.
+    %%
+    case release_loop(Key, MaxPer, NumResources) of
+        ok -> ok;
+        {error, out_of_buckets} -> warn_buckets(Key, NumResources)
+    end,
+    notify_unlock(Key).
 
-notify_lock(Key) ->
-    gen_server:cast(?MODULE, {lock, self(), Key}).
+notify_lock(Key, NumResources) ->
+    gen_server:cast(?MODULE, {lock, self(), Key, NumResources}).
 
 notify_unlock(Key) ->
     %% This call needs to be synchronous to avoid having a process locking
@@ -117,7 +113,7 @@ init(MaxMultiplier) ->
     %%
     %% The Refs table holds its own lookup table: `{Ref, Key}' for crashes, and
     %% `{{Pid,Key},Ref}' for proper releases.
-    Refs = ets:new(lock_refs, [set, private]),
+    Refs = ets:new(lock_refs, [bag, public]),
     Locks = ets:new(?TABLE, [named_table, public, set, {write_concurrency, true}]),
     {ok, #state{locks=Locks,
                 refs=Refs,
@@ -125,10 +121,11 @@ init(MaxMultiplier) ->
 
 handle_call({unlock, Pid, Key}, _From, S=#state{refs=Tab}) ->
     case ets:lookup(Tab, {Pid, Key}) of
-        [{{Pid,Key}, Ref}] ->
+        [{{Pid,Key}, Ref}|_] -> % pick any ref
             %% Clean up the refs for when the process dies. We
             %% don't clean up from the queue because we don't need to.
             ets:delete(Tab, Ref),
+            ets:delete_object(Tab, {{Pid,Key},Ref}),
             erlang:demonitor(Ref),
             {reply, ok, S};
         [] -> %% This is bad
@@ -143,9 +140,9 @@ handle_call(Call, _From, S=#state{}) ->
                              [Call]),
     {noreply, S}.
 
-handle_cast({lock, Pid, Key}, S=#state{refs=Tab}) ->
+handle_cast({lock, Pid, Key, Buckets}, S=#state{refs=Tab}) ->
     Ref = erlang:monitor(process, Pid),
-    ets:insert(Tab, [{{Pid,Key},Ref}, {Ref,Key}]),
+    ets:insert(Tab, [{{Pid,Key},Ref}, {Ref,{Key,Buckets}}]),
     {noreply, S};
 handle_cast(Cast, S=#state{}) ->
     error_logger:warning_msg("mod=lock_manager at=handle_cast "
@@ -155,14 +152,16 @@ handle_cast(Cast, S=#state{}) ->
 
 handle_info({'DOWN', Ref, process, Pid, _Reason}, S=#state{refs=Tab, mod=Mod}) ->
     case ets:lookup(Tab, Ref) of
-        [{Ref,Key}] ->
-            ets:delete(Tab, {Pid,Key}),
+        [{Ref,{Key,Buckets}}] ->
+            ets:delete(Tab, Ref),
+            ets:delete_object(Tab, {{Pid,Key},Ref}),
             %% Because we can't know for sure if the `Mod' value is the final one
             %% or not, we may have to decrement a bunch of times in a loop, similar
             %% to the external acquisition procedure.
-            %% This one risks leaking far more locks than the one that's external,
-            %% however, and is only an absolute safeguard in case of failures.
-            release_loop_mod(Key, Mod);
+            case release_loop(Key, Mod, find_highest_bucket(Key, Buckets)) of
+                ok -> ok;
+                {error, out_of_buckets} -> warn_buckets(Key, Buckets)
+            end;
         [] ->
             %% we already handled an unlock there, and the process must
             %% have died before we stopped monitoring. Alternatively, this
@@ -183,29 +182,53 @@ terminate(_Reason, _State) ->
     ok.
 
 
-release_loop(Key, Max) -> release_loop(Key, Max, ?MAX_DECR_TRIES).
+release_loop(Key, MaxPer, NumResources) ->
+    HighestBucket = find_highest_bucket(Key, NumResources),
+    release_loop(Key, MaxPer, HighestBucket, HighestBucket).
 
-release_loop(Key, _Max, 0) ->
-    ets:update_counter(?TABLE, Key, {2, -2, 0, 0}),
-    notify_unlock(Key);
-release_loop(Key, Max, Tries) ->
+release_loop(Key, MaxPer, NumResources, Bucket) ->
+    %% This bucket should exist, otherwise we're leaking connections
+    %% anyway and will need to think hard about solving it.
+    N = ets:update_counter(?TABLE, {Key,Bucket}, {2, -1}),
+    if N < MaxPer, N >= 0 ->
+           ok;
+       N =:= MaxPer ->
+           release_loop_inner({Key,Bucket}, MaxPer),
+           ok;
+       N < 0, Bucket =:= 1 ->
+           %% We decremented too much, undo this. But because
+           %% this is the last bucket, this is all we could do.
+           %% Somehow, something is wrong and we're leaking a lock.
+           %% We have to give up though.
+           ets:update_counter(?TABLE, {Key,Bucket}, {2, 1}),
+           {error, out_of_buckets};
+       N < 0 ->
+           %% We decremented too much -- this bucket was empty already.
+           %% Undo this and try the next one.
+           ets:update_counter(?TABLE, {Key,Bucket}, {2, 1}),
+           release_loop(Key, MaxPer, NumResources, Bucket-1)
+    end.
+
+release_loop_inner(Key, Max) -> release_loop_inner(Key, Max, ?MAX_DECR_TRIES).
+
+release_loop_inner(Key, _Max, 0) ->
+    ets:update_counter(?TABLE, Key, {2, -2, 0, 0});
+release_loop_inner(Key, Max, Tries) ->
     N = ets:update_counter(?TABLE, Key, {2, -1, 0, 0}),
     if N =:= Max ->
-        release_loop(Key, Max, Tries-1);
+        release_loop_inner(Key, Max, Tries-1);
        N < Max ->
         ok
     end.
 
-release_loop_mod(Key, Mod) -> release_loop_mod(Key, Mod, ?MAX_DECR_MOD_TRIES).
-
-release_loop_mod(Key, _Mod, 0) ->
-    ets:update_counter(?TABLE, Key, {2, -2, 0, 0});
-release_loop_mod(Key, Mod, Tries) ->
-    N = ets:update_counter(?TABLE, Key, {2, -1, 0, 0}),
-    case N rem Mod of
-        0 -> % on an edge!
-            release_loop_mod(Key, Mod, Tries-1);
-        _ -> % anywhere but an edge.
-            ok
+find_highest_bucket(_, 1) -> 1;
+find_highest_bucket(Key, Bucket) ->
+    case ets:lookup(?TABLE, {Key,Bucket}) of
+        [] -> find_highest_bucket(Key, Bucket-1);
+        _ -> Bucket
     end.
 
+warn_buckets(Key, Bucket) ->
+    error_logger:warning_msg("mod=lock_manager at=release_loop_mod "
+                             "warning=out_of_buckets key=~p bucket=~p~n",
+                             [Key,Bucket]).
