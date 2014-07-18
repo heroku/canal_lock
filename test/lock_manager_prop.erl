@@ -2,31 +2,31 @@
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%-define(PROPMOD, proper).
-%-define(PROP(A), {timeout, 60, ?_assert(?PROPMOD:quickcheck(A(), [100]))}).
-%
-%proper_test_() ->
-%    {"Run all property-based tests",
-%        [?PROP(prop_lock_unlock)]}.
-%
-%prop_lock_unlock() ->
-%    ?FORALL({Mod,Num,Keys}, {max_per(), num_resources(), unique_keys()},
-%        begin
-%            start(Mod),
-%            Max = Mod*Num,
-%            Runs = lists:seq(1,Max),
-%            Locks = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys, _ <- Runs],
-%            ReLocks1 = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys],
-%            Unlocks = [lock_manager:release(Key, Mod, Num) || Key <- Keys, _ <- Runs],
-%            ReLocks2 = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys],
-%            lists:all(fun(Res) -> Res =:= acquired end, Locks)
-%            andalso
-%            lists:all(fun(Res) -> Res =:= full end, ReLocks1)
-%            andalso
-%            lists:all(fun(Res) -> Res =:= ok end, Unlocks)
-%            andalso
-%            lists:all(fun(Res) -> Res =:= acquired end, ReLocks2)
-%        end).
+-define(PROPMOD, proper).
+-define(PROP(A), {timeout, 120, ?_assert(?PROPMOD:quickcheck(A(), [100]))}).
+
+proper_test_() ->
+    {"Run all property-based tests",
+        [?PROP(prop_lock_unlock)]}.
+
+prop_lock_unlock() ->
+    ?FORALL({Mod,Num,Keys}, {max_per(), num_resources(), unique_keys()},
+        begin
+            start(Mod),
+            Max = Mod*Num,
+            Runs = lists:seq(1,Max),
+            Locks = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys, _ <- Runs],
+            ReLocks1 = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys],
+            Unlocks = [lock_manager:release(Key, Mod, Num) || Key <- Keys, _ <- Runs],
+            ReLocks2 = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys],
+            lists:all(fun(Res) -> Res =:= acquired end, Locks)
+            andalso
+            lists:all(fun(Res) -> Res =:= full end, ReLocks1)
+            andalso
+            lists:all(fun(Res) -> Res =:= ok end, Unlocks)
+            andalso
+            lists:all(fun(Res) -> Res =:= acquired end, ReLocks2)
+        end).
 
 %% TODO: same test through crashes only
 downsize_test() ->
