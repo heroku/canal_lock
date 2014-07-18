@@ -17,3 +17,4 @@ logs
 .rebar
 _rel
 .eunit
+concuerror_report.txt
