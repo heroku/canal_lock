@@ -38,7 +38,7 @@ acquire(Key, MaxPer, NumResources, Bucket) ->
         Cap ->
             acquire(Key, MaxPer, NumResources, Bucket+1);
         _N ->
-            notify_lock(Key, NumResources),
+            notify_lock(Key),
             acquired
     catch
         error:badarg ->
@@ -47,7 +47,11 @@ acquire(Key, MaxPer, NumResources, Bucket) ->
             %% and to acquire the lock at the same time to save an operation
             case ets:insert_new(?TABLE, {{Key,Bucket},1}) of
                 true ->
-                    notify_lock(Key, NumResources),
+                    case Bucket of
+                       1 -> ets:insert(?TABLE, {{Key,highest},1});
+                       _ -> ets:update_counter(?TABLE, {Key,highest}, {2,1})
+                    end,
+                    notify_lock(Key),
                     acquired;
                 false ->
                     %% Someone else beat us to it
@@ -91,14 +95,14 @@ release(Key, MaxPer, NumResources) ->
     %% was below 0, it's fine, as one of the reincrements we will eventually
     %% account for it.
     %%
-    case release_loop(Key, MaxPer, NumResources) of
+    case release_loop(Key, MaxPer) of
         ok -> ok;
         {error, out_of_buckets} -> warn_buckets(Key, NumResources)
     end,
     notify_unlock(Key).
 
-notify_lock(Key, NumResources) ->
-    gen_server:cast(?MODULE, {lock, self(), Key, NumResources}).
+notify_lock(Key) ->
+    gen_server:cast(?MODULE, {lock, self(), Key}).
 
 notify_unlock(Key) ->
     %% This call needs to be synchronous to avoid having a process locking
@@ -140,9 +144,9 @@ handle_call(Call, _From, S=#state{}) ->
                              [Call]),
     {noreply, S}.
 
-handle_cast({lock, Pid, Key, Buckets}, S=#state{refs=Tab}) ->
+handle_cast({lock, Pid, Key}, S=#state{refs=Tab}) ->
     Ref = erlang:monitor(process, Pid),
-    ets:insert(Tab, [{{Pid,Key},Ref}, {Ref,{Key,Buckets}}]),
+    ets:insert(Tab, [{{Pid,Key},Ref}, {Ref,Key}]),
     {noreply, S};
 handle_cast(Cast, S=#state{}) ->
     error_logger:warning_msg("mod=lock_manager at=handle_cast "
@@ -152,15 +156,15 @@ handle_cast(Cast, S=#state{}) ->
 
 handle_info({'DOWN', Ref, process, Pid, _Reason}, S=#state{refs=Tab, mod=Mod}) ->
     case ets:lookup(Tab, Ref) of
-        [{Ref,{Key,Buckets}}] ->
+        [{Ref,Key}] ->
             ets:delete(Tab, Ref),
             ets:delete_object(Tab, {{Pid,Key},Ref}),
             %% Because we can't know for sure if the `Mod' value is the final one
             %% or not, we may have to decrement a bunch of times in a loop, similar
             %% to the external acquisition procedure.
-            case release_loop(Key, Mod, find_highest_bucket(Key, Buckets)) of
+            case release_loop(Key, Mod) of
                 ok -> ok;
-                {error, out_of_buckets} -> warn_buckets(Key, Buckets)
+                {error, out_of_buckets} -> warn_buckets(Key, find_highest_bucket(Key))
             end;
         [] ->
             %% we already handled an unlock there, and the process must
@@ -182,8 +186,8 @@ terminate(_Reason, _State) ->
     ok.
 
 
-release_loop(Key, MaxPer, NumResources) ->
-    HighestBucket = find_highest_bucket(Key, NumResources),
+release_loop(Key, MaxPer) ->
+    HighestBucket = find_highest_bucket(Key),
     release_loop(Key, MaxPer, HighestBucket, HighestBucket).
 
 release_loop(Key, MaxPer, NumResources, Bucket) ->
@@ -221,12 +225,8 @@ release_loop_inner(Key, Max, Tries) ->
         ok
     end.
 
-find_highest_bucket(_, 1) -> 1;
-find_highest_bucket(Key, Bucket) ->
-    case ets:lookup(?TABLE, {Key,Bucket}) of
-        [] -> find_highest_bucket(Key, Bucket-1);
-        _ -> Bucket
-    end.
+find_highest_bucket(Key) ->
+    ets:update_counter(?TABLE, {Key,highest}, {2,0}).
 
 warn_buckets(Key, Bucket) ->
     error_logger:warning_msg("mod=lock_manager at=release_loop_mod "

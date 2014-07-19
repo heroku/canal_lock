@@ -3,7 +3,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(PROPMOD, proper).
--define(PROP(A), {timeout, 120, ?_assert(?PROPMOD:quickcheck(A(), [100]))}).
+-define(PROP(A), {timeout, 100, ?_assert(?PROPMOD:quickcheck(A(), [100]))}).
 
 proper_test_() ->
     {"Run all property-based tests",
@@ -66,9 +66,9 @@ upsize_release_test() ->
     %% releasing when the cap is higher than your max still works
     ?assertEqual(ok, lock_manager:release(key, 5, 1)), % down to 5 taken
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 1)), % free from the first bucket
+    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % limit enforced by deleting from highest
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)), % back to 7, with overflow
+    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)), % back to 6
     show_table().
 
 ten_k_per_sec_test() ->
