@@ -6,7 +6,7 @@
 -module(lock_manager).
 -behaviour(gen_server).
 
--export([start_link/1, acquire/3, release/3]).
+-export([start_link/1, acquire/3, release/3, stop/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          code_change/3, terminate/2]).
 
@@ -97,6 +97,12 @@ release(Key, MaxPer, NumResources) ->
     end,
     notify_unlock(Key).
 
+stop() ->
+    %% Dirty termination of the server. It won't clean up anything behind other
+    %% than its own state, but is useful for tests and making sure state is
+    %% gone.
+    gen_server:call(?MODULE, stop).
+
 notify_lock(Key, NumResources) ->
     gen_server:cast(?MODULE, {lock, self(), Key, NumResources}).
 
@@ -113,7 +119,7 @@ init(MaxMultiplier) ->
     %%
     %% The Refs table holds its own lookup table: `{Ref, Key}' for crashes, and
     %% `{{Pid,Key},Ref}' for proper releases.
-    Refs = ets:new(lock_refs, [bag, public]),
+    Refs = ets:new(lock_refs, [bag, protected]),
     Locks = ets:new(?TABLE, [named_table, public, set, {write_concurrency, true}]),
     {ok, #state{locks=Locks,
                 refs=Refs,
@@ -134,6 +140,9 @@ handle_call({unlock, Pid, Key}, _From, S=#state{refs=Tab}) ->
                                    [Key]),
             {reply, ok, S}
     end;
+handle_call(stop, _From, S=#state{}) ->
+    %% debug termination of server
+    {stop, normal, ok, S};
 handle_call(Call, _From, S=#state{}) ->
     error_logger:warning_msg("mod=lock_manager at=handle_call "
                              "warning=unexpected_msg message=~p~n",

@@ -2,12 +2,22 @@
 %%% It is based on a central tick server for synchronization, in order to
 %%% make this test runnable with concuerror to generate relevant
 %%% exhaustive scheduler interleaving tests.
+%%%
+%%% Run with Concuerror as:
+%%%
+%%% rebar compile && concuerror --pa ebin --pa test -f test/lock_manager_steps.erl \
+%%% -m lock_manager_steps -t start --after_timeout 1 --treat_as_normal shutdown
+%%%
+%%% The last two options are required to make sure that Concuerror doesn't
+%%% explore (and voluntarily trigger) timeouts, not required for this test, and
+%%% that the 'shutdown' ending of the lock manager isn't considered an error --
+%%% it is only triggered manually at the end of each run.
 -module(lock_manager_steps).
 -compile(export_all).
 
 -define(BUCKETS_SMALL, 2).
--define(BUCKETS_LARGE, 4).
--define(MAXPER, 5).
+-define(BUCKETS_LARGE, 3).
+-define(MAXPER, 2).
 
 %% Steps:
 %%  - start the lock manager
@@ -39,29 +49,40 @@ start() ->
     receive
         {Resource, freed} -> ok
     end,
-    SmallPids = [spawn_link(fun worker/0) || _ <- lists:seq(1,MinTot*2)],
+    SmallPids = [spawn_link(fun worker/0) || _ <- lists:seq(1,MinTot+2)],
     [Pid ! {init, Resource, ?MAXPER, ?BUCKETS_SMALL} || Pid <- SmallPids],
     receive
+        %{Resource, all_locked, MinTot} -> sync_all(SmallPids)
         {Resource, all_locked, MinTot} -> ok
     end,
-    BigPids = [spawn_link(fun worker/0) || _ <- lists:seq(1,MaxTot*2)],
+    BigPids = [spawn_link(fun worker/0) || _ <- lists:seq(1,MaxTot+2)],
     Resource ! {release_all,MaxTot},
     receive
-        {Resource, freed} -> ok
+        {Resource, freed} -> sync_all(SmallPids)
     end,
     [Pid ! {init, Resource, ?MAXPER, ?BUCKETS_LARGE} || Pid <- BigPids],
     [Pid ! {init, Resource, ?MAXPER, ?BUCKETS_SMALL} || Pid <- SmallPids],
     receive
+        %{Resource, all_locked, MaxTot} -> %sync_all(SmallPids++BigPids)
         {Resource, all_locked, MaxTot} -> ok
     end,
     Resource ! {release_all,MinTot},
     receive
-        {Resource, freed} -> ok
+        {Resource, freed} -> sync_all(SmallPids++BigPids)
     end,
     [Pid ! {init, Resource, ?MAXPER, ?BUCKETS_SMALL} || Pid <- SmallPids],
     receive
+        %{Resource, all_locked, MinTot} -> sync_all(SmallPids++BigPids)
         {Resource, all_locked, MinTot} -> ok
-    end.
+    end,
+    %% release workers
+    Resource ! {release_all,MaxTot},
+    receive
+        {Resource, freed} -> sync_all(SmallPids++BigPids)
+    end,
+    cause_death(Resource),
+    [cause_death(Pid) || Pid <- SmallPids++BigPids],
+    lock_manager:stop().
 
 
 resource(Pid) -> resource(Pid, 0, []).
@@ -79,26 +100,54 @@ resource(Parent, AllLocked, Locks) ->
             resource(Parent, NewAll, []);
         {Pid, locked} ->
             NewLocks = [Pid | Locks],
+            %% This case crashes if more locks are acquired than available
             case length(NewLocks) of
                 AllLocked -> Parent ! {self(), all_locked, AllLocked};
                 N when N < AllLocked -> ok
             end,
-            resource(Parent, AllLocked, NewLocks)
+            resource(Parent, AllLocked, NewLocks);
+        {fin, Pid} ->
+            Pid ! {self(), fin}
     end.
 
 worker() ->
     receive
         {init, Pid, MaxPer, Buckets} ->
             case lock_manager:acquire(key, MaxPer, Buckets) of
-                full -> ok;
+                full -> worker();
                 acquired ->
                     Pid ! {self(), locked},
-                    receive
-                        unlock ->
-                            ok = lock_manager:release(key, MaxPer, Buckets),
-                            Pid ! {self(), unlocked}
-                    end
-            end
-    end,
-    worker().
+                    locked_worker(Pid, MaxPer, Buckets)
+            end;
+        {sync, Pid} ->
+            Pid ! {self(), sync},
+            worker();
+        {fin, Pid} ->
+            Pid ! {self(), fin}
+    end.
 
+locked_worker(Pid, MaxPer, Buckets) ->
+    receive
+        {sync, Caller} ->
+            Caller ! {self(), sync},
+            locked_worker(Pid, MaxPer, Buckets);
+        unlock ->
+            ok = lock_manager:release(key, MaxPer, Buckets),
+            Pid ! {self(), unlocked},
+            worker();
+        {fin, Caller} ->
+            Caller ! {self(), fin}
+    end.
+
+sync_all([]) -> ok;
+sync_all([Pid|Pids]) ->
+    Pid ! {sync, self()},
+    receive
+        {Pid, sync} -> sync_all(Pids)
+    end.
+
+cause_death(Pid) ->
+    Pid ! {fin, self()},
+    receive
+        {Pid, fin} -> ok
+    end.
