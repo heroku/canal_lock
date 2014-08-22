@@ -64,9 +64,9 @@ upsize_release_test() ->
     %% releasing when the cap is higher than your max still works
     ?assertEqual(ok, lock_manager:release(key, 5, 1)), % down to 5 taken
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 1)), % free from the first bucket
+    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % limit enforced by deleting from highest
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)), % back to 7, with overflow
+    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)), % back to 6
     show_table().
 
 release_right_resource_test() ->
@@ -118,6 +118,7 @@ downsize_crash_test() ->
 
 upsize_crash_test() ->
     start(5),
+    ?debugVal(upsizecrash),
     Pids = [worker() || _ <- lists:seq(1,5)],
     ?assert(lists:all(fun(Res) -> Res =:= acquired end,
                       [worker_acquire(Pid, key, 5, 1) || Pid <- Pids])),
@@ -128,9 +129,9 @@ upsize_crash_test() ->
     %% releasing when the cap is higher than your max still works
     ?assertEqual(ok, worker_die(lists:nth(1, Pids))), % down to 5 taken
     show_table(),
-    ?assertEqual(acquired, until_acquired(key, 5, 1, 100)), % free from the first bucket
+    ?assertEqual(timeout, until_acquired(key, 5, 1, 100)), % limit enforced by deleting from highest
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)), % back to 7, with overflow
+    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)), % back to 6
     show_table().
 
 %ten_k_per_sec_test() ->
@@ -222,8 +223,8 @@ worker() ->
 worker_acquire(Pid, Key, MaxPer, Num) ->
     worker_ask(acquire, Pid, Key, MaxPer, Num).
 
-worker_until_acquired(Pid, Key, MaxPer, Num) ->
-    worker_ask(acquire_until, Pid, Key, MaxPer, Num).
+%worker_until_acquired(Pid, Key, MaxPer, Num) ->
+%    worker_ask(acquire_until, Pid, Key, MaxPer, Num).
 
 worker_release(Pid, Key, MaxPer, Num) ->
     worker_ask(release, Pid, Key, MaxPer, Num).
