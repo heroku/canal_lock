@@ -137,7 +137,8 @@ looking up `MonitorRef` (returning `{Ref, Key}`), and then deletes that entry
 from the table, and the `{{Pid, Key}, Ref}` entry.
 
 It then starts an internal release process identical to the one the caller would
-have made on its own.
+have made on its own (this is why the lock manager is configured with a resource
+value indicating the max amounts of locks when started.)
 
 It could be interesting to make that loop asynchronous, but benchmarking would
 be needed before considering it an optimization.
