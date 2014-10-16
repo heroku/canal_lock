@@ -5,14 +5,14 @@
 %%%
 %%% Run with Concuerror as:
 %%%
-%%% rebar compile && concuerror --pa ebin --pa test -f test/lock_manager_steps.erl \
-%%% -m lock_manager_steps -t start --after_timeout 1 --treat_as_normal shutdown
+%%% rebar compile && concuerror --pa ebin --pa test -f test/canal_lock_steps.erl \
+%%% -m canal_lock_steps -t start --after_timeout 1 --treat_as_normal shutdown
 %%%
 %%% The last two options are required to make sure that Concuerror doesn't
 %%% explore (and voluntarily trigger) timeouts, not required for this test, and
 %%% that the 'shutdown' ending of the lock manager isn't considered an error --
 %%% it is only triggered manually at the end of each run.
--module(lock_manager_steps).
+-module(canal_lock_steps).
 -compile(export_all).
 
 -define(BUCKETS_SMALL, 2).
@@ -40,7 +40,7 @@
 %%  maybe not properly tested: registering *while* shrinking down
 
 start() ->
-    {ok, Lock} = lock_manager:start_link(?MAXPER),
+    {ok, _Pid} = canal_lock:start_link(?MAXPER),
     MinTot = ?BUCKETS_SMALL*?MAXPER,
     MaxTot = ?BUCKETS_LARGE*?MAXPER,
     Parent = self(),
@@ -82,7 +82,7 @@ start() ->
     end,
     cause_death(Resource),
     [cause_death(Pid) || Pid <- SmallPids++BigPids],
-    lock_manager:stop().
+    canal_lock:stop().
 
 
 resource(Pid) -> resource(Pid, 0, []).
@@ -113,7 +113,7 @@ resource(Parent, AllLocked, Locks) ->
 worker() ->
     receive
         {init, Pid, MaxPer, Buckets} ->
-            case lock_manager:acquire(key, MaxPer, Buckets) of
+            case canal_lock:acquire(key, MaxPer, Buckets) of
                 full -> worker();
                 acquired ->
                     Pid ! {self(), locked},
@@ -132,7 +132,7 @@ locked_worker(Pid, MaxPer, Buckets) ->
             Caller ! {self(), sync},
             locked_worker(Pid, MaxPer, Buckets);
         unlock ->
-            ok = lock_manager:release(key, MaxPer, Buckets),
+            ok = canal_lock:release(key, MaxPer, Buckets),
             Pid ! {self(), unlocked},
             worker();
         {fin, Caller} ->

@@ -1,4 +1,4 @@
--module(lock_manager_prop).
+-module(canal_lock_prop).
 %-include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
@@ -15,10 +15,10 @@
 %            start(Mod),
 %            Max = Mod*Num,
 %            Runs = lists:seq(1,Max),
-%            Locks = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys, _ <- Runs],
-%            ReLocks1 = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys],
-%            Unlocks = [lock_manager:release(Key, Mod, Num) || Key <- Keys, _ <- Runs],
-%            ReLocks2 = [lock_manager:acquire(Key, Mod, Num) || Key <- Keys],
+%            Locks = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys, _ <- Runs],
+%            ReLocks1 = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys],
+%            Unlocks = [canal_lock:release(Key, Mod, Num) || Key <- Keys, _ <- Runs],
+%            ReLocks2 = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys],
 %            lists:all(fun(Res) -> Res =:= acquired end, Locks)
 %            andalso
 %            lists:all(fun(Res) -> Res =:= full end, ReLocks1)
@@ -31,42 +31,42 @@
 downsize_release_test() ->
     start(5),
     ?assert(lists:all(fun(Res) -> Res =:= acquired end,
-                      [lock_manager:acquire(key, 5, 2) || _ <- lists:seq(1,10)])),
-    ?assertEqual(full, lock_manager:acquire(key, 5, 2)),
+                      [canal_lock:acquire(key, 5, 2) || _ <- lists:seq(1,10)])),
+    ?assertEqual(full, canal_lock:acquire(key, 5, 2)),
     show_table(),
     %% we downsize!
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)),
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)),
     show_table(),
     %% We have 10 keys still active, let's try interleaving them
-    ?assertEqual(ok, lock_manager:release(key, 5, 2)), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=9 active
-    ?assertEqual(ok, lock_manager:release(key, 5, 2)), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=8 active
-    ?assertEqual(ok, lock_manager:release(key, 5, 2)), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=7 active
-    ?assertEqual(ok, lock_manager:release(key, 5, 2)), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=6 active
-    ?assertEqual(ok, lock_manager:release(key, 5, 2)), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=5 active
-    ?assertEqual(ok, lock_manager:release(key, 5, 2)), % old leaving
+    ?assertEqual(ok, canal_lock:release(key, 5, 2)), % old leaving
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=9 active
+    ?assertEqual(ok, canal_lock:release(key, 5, 2)), % old leaving
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=8 active
+    ?assertEqual(ok, canal_lock:release(key, 5, 2)), % old leaving
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=7 active
+    ?assertEqual(ok, canal_lock:release(key, 5, 2)), % old leaving
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=6 active
+    ?assertEqual(ok, canal_lock:release(key, 5, 2)), % old leaving
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=5 active
+    ?assertEqual(ok, canal_lock:release(key, 5, 2)), % old leaving
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 1)), % new trying, tot=4 active
+    ?assertEqual(acquired, canal_lock:acquire(key, 5, 1)), % new trying, tot=4 active
     show_table().
 
 upsize_release_test() ->
     start(5),
     ?assert(lists:all(fun(Res) -> Res =:= acquired end,
-                      [lock_manager:acquire(key, 5, 1) || _ <- lists:seq(1,5)])),
+                      [canal_lock:acquire(key, 5, 1) || _ <- lists:seq(1,5)])),
     %% upsize to 10, 6 taken
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)),
+    ?assertEqual(acquired, canal_lock:acquire(key, 5, 2)),
     show_table(),
     %% releasing when the cap is higher than your max still works
-    ?assertEqual(ok, lock_manager:release(key, 5, 1)), % down to 5 taken
+    ?assertEqual(ok, canal_lock:release(key, 5, 1)), % down to 5 taken
     show_table(),
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % limit enforced by deleting from highest
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % limit enforced by deleting from highest
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)), % back to 6
+    ?assertEqual(acquired, canal_lock:acquire(key, 5, 2)), % back to 6
     show_table().
 
 release_right_resource_test() ->
@@ -76,7 +76,7 @@ release_right_resource_test() ->
     ?assertEqual(acquired, worker_acquire(Pid1, key, 3, 1)),
     ?assertEqual(acquired, worker_acquire(Pid1, key, 3, 1)),
     ?assertEqual(acquired, worker_acquire(Pid2, key, 3, 1)),
-    ?assertEqual(full, lock_manager:acquire(key, 3, 1)),
+    ?assertEqual(full, canal_lock:acquire(key, 3, 1)),
     %% Killing a fake worker that already released its own resource
     %% won't break stuff
     worker_release(Pid2, key, 3, 1),
@@ -95,25 +95,25 @@ downsize_crash_test() ->
     Pids = [worker() || _ <- lists:seq(1,10)],
     ?assert(lists:all(fun(Res) -> Res =:= acquired end,
                       [worker_acquire(Pid, key, 5, 2) || Pid <- Pids])),
-    ?assertEqual(full, lock_manager:acquire(key, 5, 2)),
+    ?assertEqual(full, canal_lock:acquire(key, 5, 2)),
     show_table(),
     %% we downsize!
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)),
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)),
     show_table(),
     %% We have 10 keys still active, let's try interleaving them
     ?assertEqual(ok, worker_die(lists:nth(1, Pids))), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=9 active
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=9 active
     ?assertEqual(ok, worker_die(lists:nth(2, Pids))), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=8 active
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=8 active
     ?assertEqual(ok, worker_die(lists:nth(3, Pids))), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=7 active
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=7 active
     ?assertEqual(ok, worker_die(lists:nth(4, Pids))), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=6 active
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=6 active
     ?assertEqual(ok, worker_die(lists:nth(5, Pids))), % old leaving
-    ?assertEqual(full, lock_manager:acquire(key, 5, 1)), % new trying, tot=5 active
+    ?assertEqual(full, canal_lock:acquire(key, 5, 1)), % new trying, tot=5 active
     ?assertEqual(ok, worker_die(lists:nth(6, Pids))), % old leaving
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 1)), % new trying, tot=4 active
+    ?assertEqual(acquired, canal_lock:acquire(key, 5, 1)), % new trying, tot=4 active
     show_table().
 
 upsize_crash_test() ->
@@ -124,14 +124,14 @@ upsize_crash_test() ->
                       [worker_acquire(Pid, key, 5, 1) || Pid <- Pids])),
     %% upsize to 10, 6 taken
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)),
+    ?assertEqual(acquired, canal_lock:acquire(key, 5, 2)),
     show_table(),
     %% releasing when the cap is higher than your max still works
     ?assertEqual(ok, worker_die(lists:nth(1, Pids))), % down to 5 taken
     show_table(),
     ?assertEqual(timeout, until_acquired(key, 5, 1, 100)), % limit enforced by deleting from highest
     show_table(),
-    ?assertEqual(acquired, lock_manager:acquire(key, 5, 2)), % back to 6
+    ?assertEqual(acquired, canal_lock:acquire(key, 5, 2)), % back to 6
     show_table().
 
 %ten_k_per_sec_test() ->
@@ -142,10 +142,10 @@ upsize_crash_test() ->
 %    start(Per), % buckets of Per, we'll have 10 of them
 %    L = lists:seq(1,Per*Buckets),
 %    T1 = os:timestamp(),
-%    Locks = [lock_manager:acquire(key, Per, Buckets) || _ <- L],
+%    Locks = [canal_lock:acquire(key, Per, Buckets) || _ <- L],
 %    show_table(),
-%    full = lock_manager:acquire(key, Per, Buckets),
-%    Unlocks = [lock_manager:release(key, Per, Buckets) || _ <- L],
+%    full = canal_lock:acquire(key, Per, Buckets),
+%    Unlocks = [canal_lock:release(key, Per, Buckets) || _ <- L],
 %    T2 = os:timestamp(),
 %    show_table(),
 %    Delta = ?debugVal(timer:now_diff(T2,T1)),
@@ -164,8 +164,8 @@ upsize_crash_test() ->
 %    Procs = lists:seq(1,ProcCount),
 %    Parent = self(),
 %    Fun = fun() ->
-%        [case lock_manager:acquire(key, Per, Buckets) of
-%                acquired -> lock_manager:release(key, Per, Buckets);
+%        [case canal_lock:acquire(key, Per, Buckets) of
+%                acquired -> canal_lock:release(key, Per, Buckets);
 %                full -> ok
 %         end || _ <- lists:seq(1,Reps)],
 %        Parent ! done
@@ -180,7 +180,7 @@ upsize_crash_test() ->
 %    ?assert(1000000 >= Delta). % 1s in µs
 
 show_table() ->
-    State = sys:get_state(lock_manager),
+    State = sys:get_state(canal_lock),
     Tab = ets:tab2list(element(2,State)),
 %    Tab2 = ets:tab2list(element(3,State)),
 %    ?debugVal(Tab2),
@@ -194,26 +194,26 @@ show_table() ->
 %max_per() -> ?SUCHTHAT(X, pos_integer(), X > 1 andalso X < 200).
 
 start(MaxPer) ->
-    case whereis(lock_manager) of
+    case whereis(canal_lock) of
         undefined -> ok;
         Pid ->
             process_flag(trap_exit, true),
             exit(Pid, kill),
             receive {'EXIT', Pid, _} -> process_flag(trap_exit, false) end
     end,
-    lock_manager:start_link(MaxPer).
+    canal_lock:start_link(MaxPer).
 
 worker() ->
     spawn_link(fun F() ->
         receive
             {acquire, From, Key, MaxPer, Num} ->
-                From ! {self(), lock_manager:acquire(Key, MaxPer, Num)},
+                From ! {self(), canal_lock:acquire(Key, MaxPer, Num)},
                 F();
             {acquire_until, From, Key, MaxPer, Num} ->
                 From ! {self(), until_acquired(Key, MaxPer, Num, 100)},
                 F();
             {release, From, Key, MaxPer, Num} ->
-                From ! {self(), lock_manager:release(Key, MaxPer, Num)},
+                From ! {self(), canal_lock:release(Key, MaxPer, Num)},
                 F();
             die ->
                 exit(asked_for)
@@ -245,7 +245,7 @@ worker_die(Pid) ->
 
 until_acquired(_, _, _, Time) when Time =< 0 -> timeout;
 until_acquired(Key, Max, Num, Time) ->
-    case lock_manager:acquire(Key, Max, Num) of
+    case canal_lock:acquire(Key, Max, Num) of
         acquired -> acquired;
         full ->
             timer:sleep(5),

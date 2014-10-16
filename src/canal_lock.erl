@@ -1,9 +1,9 @@
-%% TODO: other undefined behavior: lock at 2max, full at 2max, full at 3max too.
-%% That can represent a minimal upwards leak
+%% TODO: test behavior: lock at 2max, full at 2max, full at 3max too due to
+%%       concurrency
 %%
 %%% N.B. All the buckets are tried sequentially in order for us to minimize the
 %%% amount of work needed to decrement without error.
--module(lock_manager).
+-module(canal_lock).
 -behaviour(gen_server).
 
 -export([start_link/1, acquire/3, release/3, stop/0]).
@@ -139,7 +139,7 @@ handle_call({unlock, Pid, Key}, _From, S=#state{refs=Tab}) ->
             erlang:demonitor(Ref),
             {reply, ok, S};
         [] -> %% This is bad
-            error_logger:error_msg("mod=lock_manager at=unlock "
+            error_logger:error_msg("mod=canal_lock at=unlock "
                                    "error=unexpected_unlock key=~p~n",
                                    [Key]),
             {reply, ok, S}
@@ -148,7 +148,7 @@ handle_call(stop, _From, S=#state{}) ->
     %% debug termination of server
     {stop, normal, ok, S};
 handle_call(Call, _From, S=#state{}) ->
-    error_logger:warning_msg("mod=lock_manager at=handle_call "
+    error_logger:warning_msg("mod=canal_lock at=handle_call "
                              "warning=unexpected_msg message=~p~n",
                              [Call]),
     {noreply, S}.
@@ -158,7 +158,7 @@ handle_cast({lock, Pid, Key}, S=#state{refs=Tab}) ->
     ets:insert(Tab, [{{Pid,Key},Ref}, {Ref,Key}]),
     {noreply, S};
 handle_cast(Cast, S=#state{}) ->
-    error_logger:warning_msg("mod=lock_manager at=handle_cast "
+    error_logger:warning_msg("mod=canal_lock at=handle_cast "
                              "warning=unexpected_msg message=~p~n",
                              [Cast]),
     {noreply, S}.
@@ -183,7 +183,7 @@ handle_info({'DOWN', Ref, process, Pid, _Reason}, S=#state{refs=Tab, mod=Mod}) -
     end,
     {noreply, S};
 handle_info(Info, S=#state{}) ->
-    error_logger:warning_msg("mod=lock_manager at=handle_info "
+    error_logger:warning_msg("mod=canal_lock at=handle_info "
                              "warning=unexpected_msg message=~p~n",
                              [Info]),
     {noreply, S}.
@@ -238,6 +238,6 @@ find_highest_bucket(Key) ->
     ets:update_counter(?TABLE, {Key,highest}, {2,0}).
 
 warn_buckets(Key, Bucket) ->
-    error_logger:warning_msg("mod=lock_manager at=release_loop_mod "
+    error_logger:warning_msg("mod=canal_lock at=release_loop_mod "
                              "warning=out_of_buckets key=~p bucket=~p~n",
                              [Key,Bucket]).

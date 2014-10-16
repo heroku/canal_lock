@@ -1,8 +1,142 @@
-# ??? Locking Manager
+# Canal Lock Manager
 
-TODO: fill this in, pick a name
+![Rideau Canal Locks](http://i.imgur.com/qOprkk3.jpg)
 
-## Picking name
+This is a new lock manager that allow a bit more concurrency for some of our
+resource management.
+
+The manager may, in some rare circumstances, allocate for more resources than
+what is expected (see [the Algorithm section](#algorithm) for details on this),
+which we tend to find preferable to under-allocation in our production systems
+where it is being used.
+
+## Do I need this Library? ##
+
+Probably not. It's for a very particular kind of locking that assumes:
+
+- There is no shared memory (only message passing)
+- Multiple locks can be acquired for each resource
+- The number of resources is variable over time
+- The number of resources may both increase and decrease *while*
+  other resources and concurrent workers hold locks
+- An increase or decrease of resources *should* be reflected in new
+  workers trying to acquire them
+- There is no time boundary on how long a resource may be in use
+- There is no need for queuing (in our case this is due to global properties
+  in distributed systems -- order is never guaranteed, therefore queues
+  are not required)
+- There are thousands and thousands of resources available, and representing
+  each of them as a process is not practical nor performant enough.
+
+Under such a scenario using a single counter as a lock, we could get the
+following chain of events:
+
+
+    A -----------> lock [max:3] -------------> ...
+    B ------> lock [max:3] --------------------------> ...
+    C -----------> lock [max:6] ---------> ...
+    D ----------------> lock [max:6] --------------------------> ...
+    E -------------> lock [max:3] ---------------------> ...
+
+And from there, it's possible to get a very, very messy interleaving where
+counters get nothing less than corrupted. The interleaving above would yield
+the following counter values:
+
+    B  A  C  E  D
+    1->2->3->4->5
+
+And here, A, B, C and D all got a lock, but E didn't, while the counter got
+stuck indicating 5 locks. Just because of this, we now have the potential case
+where we are undercounting locks, and enough of these interleavings could leave
+us in a state where all locks are seen as used, but none are actually in use. A
+perpetual livelock.
+
+*If* this problem happens to you, *then* this library might be for you. See
+[Behaviour Under Concurrent Resizes](#behaviour-under-concurrent-resize) for
+details on how this library would make the interleaving above work.
+
+## Building
+
+    $ rebar compile
+
+## Running Tests
+
+The tests currently include EUnit tests, and a bunch of property-based tests
+that are commented out because they take a long time to run. Uncomment them if
+you wish. All of these tests can be run by calling:
+
+    $ rebar get-deps compile eunit --config rebar.tests.config
+
+There is also a [Concuerror](http://concuerror.com/) suite to test all the
+potential interleavings of a sequence of locks and resource resizing.
+
+Somehow the test takes very long to finish (it's been run for days without
+either finishing nor finding an error), but more work would be required to
+make it terminate in a reasonable amount of time in the future.
+
+To run that suite:
+
+    $ rebar compile && concuerror --pa ebin --pa test -f test/canal_lock_steps.erl \
+      -m canal_lock_steps -t start --after_timeout 1 --treat_as_normal shutdown
+
+## Usage
+
+The canal lock manager works by using two parameters: buckets and a number of
+resources per bucket. For example, assuming we would like 3 connections per
+database back-end at most, and that we have 1 backend, the `Buckets` value
+would be `1`, and the `MaxPer` would be `3`.
+
+```erlang
+1> MaxPer = 3.
+3
+2> {ok, _Pid} = canal_lock:start_link(MaxPer).
+{ok,<0.46.0>}
+3> canal_lock:acquire(db, MaxPer, 1).
+acquired
+4> canal_lock:acquire(db, MaxPer, 1).
+acquired
+5> canal_lock:acquire(db, MaxPer, 1).
+acquired
+6> canal_lock:acquire(db, MaxPer, 1).
+full
+7> canal_lock:acquire(db, MaxPer, 2).
+acquired
+8> canal_lock:acquire(db, MaxPer, 1).
+full
+9> canal_lock:release(db, MaxPer, 1).
+ok
+10> canal_lock:acquire(db, MaxPer, 1).
+full
+11> canal_lock:release(db, MaxPer, 2).
+ok
+12> canal_lock:acquire(db, MaxPer, 1).
+acquired
+13> canal_lock:acquire(db, MaxPer, 1).
+full
+```
+
+Here's what happens:
+
+1. Variable declaration.
+2. Start the lock manager with a `MaxPer` value of 3. The bucket value is
+   declared *by the caller* because it's a variable amount, and we prefer to
+   have it be local to the caller than global to the node. When new resources
+   are added or removed, some in-flight requests won't recognize this.
+3. Lock acquired (1/3 of locks used)
+4. Lock acquired (2/3 of locks used)
+5. Lock acquired (3/3 of locks used)
+6. Lock denied (3/3 of locks used)
+7. Lock acquired (4/6 of locks used)
+8. Lock denied (4/6 of locks used, seen as full given 1-bucketed context)
+9. Lock released (3/6 of locks used)
+10. Lock denied (3/6 of locks used, seen as full given 1-bucketed context)
+11. Lock released (2/6 of locks used)
+12. Lock acquired (3/6 of locks used, seen as last available of 3/3)
+13. Lock denied (3/6 of locks used, seen as full given 1-bucketed context)
+
+The lock manager does allow more than one lock acquired per process and
+will monitor for failures.
+
 
 ## Algorithm
 
@@ -94,13 +228,19 @@ by the caller or the caller dying.
 
 Releasing a lock is done synchronously, the idea being that if a caller tries to
 acquire multiple locks one after the other (sequentially), it should be
-rate-limited in its operations, to protect the lock manager. I do not believe it
-is necessary, however.
+rate-limited in its operations, to protect the lock manager.
 
-The first step is to identify the highest bucket active (done by looking for
-`{Key, highest}` in the table). Starting with that bucket, the lock counter is
-incremented atomically by -1 (thus reducing the lock count). Four return values
-are possible:
+This could become necessary when there are so many requests and locks that the
+manager cannot keep up with the notifications of "I just locked a thing", "I
+just released a lock", or "I died, please release my lock". Then there is a
+risk of eventually exploding the manager's mailbox and killing the node. A
+variant of the algorithm could be made asynchronous, but safety was deemed
+important for this initial version.
+
+In any case, the first step is to identify the highest bucket active (done by
+looking for `{Key, highest}` in the table). Starting with that bucket, the lock
+counter is incremented atomically by -1 (thus reducing the lock count). Four
+return values are possible:
 
 1. The number of locks is at below 0. This means the bucket was free already.
    Reincrement the value by one (to bring it to 0, even if multiple unlocks
@@ -145,7 +285,7 @@ be needed before considering it an optimization.
 
 ### Behaviour Under Concurrent Resizes
 
-Given this timeline:
+Given this timeline (the same as earlier):
 
     A -----------> lock [max:3] -------------> ...
     B ------> lock [max:3] --------------------------> ...
@@ -153,7 +293,7 @@ Given this timeline:
     D ----------------> lock [max:6] --------------------------> ...
     E -------------> lock [max:3] ---------------------> ...
 
-The state transtions would be:
+The state transtions would now be:
 
      B    A    C    E    D
     [1]->[2]->[3]->[4]->[4,1]
