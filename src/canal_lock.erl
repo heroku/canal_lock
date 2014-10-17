@@ -37,9 +37,9 @@ acquire(Key, MaxPer, NumResources, Bucket) ->
             full;
         Cap ->
             acquire(Key, MaxPer, NumResources, Bucket+1);
-        _N ->
+        N ->
             notify_lock(Key),
-            acquired
+            {acquired, lock_counter(N, Bucket, Cap)}
     catch
         error:badarg ->
             %% table is either dead, or element not in there.
@@ -52,7 +52,7 @@ acquire(Key, MaxPer, NumResources, Bucket) ->
                        _ -> ets:update_counter(?TABLE, {Key,highest}, {2,1})
                     end,
                     notify_lock(Key),
-                    acquired;
+                    {acquired, lock_counter(1, Bucket, Cap)};
                 false ->
                     %% Someone else beat us to it
                     acquire(Key, MaxPer, NumResources, Bucket)
@@ -241,3 +241,12 @@ warn_buckets(Key, Bucket) ->
     error_logger:warning_msg("mod=canal_lock at=release_loop_mod "
                              "warning=out_of_buckets key=~p bucket=~p~n",
                              [Key,Bucket]).
+
+%% Counts the number of locks acquired based on the bucket number and
+%% the `N'th lock in the current bucket.
+lock_counter(N, Bucket, Cap) ->
+    BucketsFull = Bucket-1,
+    BelowBucketsCount = (BucketsFull)*Cap,
+    FirstBucketCorrection = -1*BucketsFull, % on 1st bucket, start at 1, not 0.
+    Current = N + FirstBucketCorrection,
+    Current + BelowBucketsCount.

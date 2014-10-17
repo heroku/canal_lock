@@ -52,7 +52,7 @@ us in a state where all locks are seen as used, but none are actually in use. A
 perpetual livelock.
 
 *If* this problem happens to you, *then* this library might be for you. See
-[Behaviour Under Concurrent Resizes](#behaviour-under-concurrent-resize) for
+[Behaviour Under Concurrent Resizes](#behaviour-under-concurrent-resizes) for
 details on how this library would make the interleaving above work.
 
 ## Building
@@ -92,15 +92,15 @@ would be `1`, and the `MaxPer` would be `3`.
 2> {ok, _Pid} = canal_lock:start_link(MaxPer).
 {ok,<0.46.0>}
 3> canal_lock:acquire(db, MaxPer, 1).
-acquired
+{acquired,1}
 4> canal_lock:acquire(db, MaxPer, 1).
-acquired
+{acquired,2}
 5> canal_lock:acquire(db, MaxPer, 1).
-acquired
+{acquired,3}
 6> canal_lock:acquire(db, MaxPer, 1).
 full
 7> canal_lock:acquire(db, MaxPer, 2).
-acquired
+{acquired,4}
 8> canal_lock:acquire(db, MaxPer, 1).
 full
 9> canal_lock:release(db, MaxPer, 1).
@@ -110,7 +110,7 @@ full
 11> canal_lock:release(db, MaxPer, 2).
 ok
 12> canal_lock:acquire(db, MaxPer, 1).
-acquired
+{acquired,3}
 13> canal_lock:acquire(db, MaxPer, 1).
 full
 ```
