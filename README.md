@@ -138,39 +138,144 @@ The lock manager does allow more than one lock acquired per process and
 will monitor for failures.
 
 
-## Algorithm
+## Algorithm (conceptual explanation)
 
-The locking mechanism used is based on the idea of limited resources, of varying
-availability. So for example, using back-end servers and access limits, it could
-be decided that each back-end can support at most 100 connections, although that
-limit is more global than local (i.e. some back-ends can possibly support only
-50 connections in practice, but the total limit for the application should still
-be higher).
+### Atomic Counters ###
 
-That per-resource limit may be fixed, but the fact that the number of back-ends
-may vary is usually not accounted for by most lock management algorithms.
+It's a well-known secret in the Erlang community that ETS tables are an easy way to optimize your code. They provide destructive updates in a well-isolated context, concurrency primitives other than a mailbox, and decent concurrent access.
 
-This lock manager works under that idea that blocks of resources available may
-vary over the application's life time, and even be doing so in a concurrent
-manner (requests made while there were 5 resources will run at the same time as
-requests made when 7 were available).
+ETS tables are basically an in-memory key-value store living within any Erlang VM, implemented in C. They have automated read and write lock management, but no transactions. They provide optimized modes for read-only or write-only sequences of operations, easily scaling to many cores. They also offer atomic access to counters, with the following properties:
 
-The manager is made of three main moving parts: the caller, the lock manager,
-and an ETS table.
+- The counters are modified by a given increment (`0`, `+N` or `-N`)
+- The counters allow increments with boundary values (not smaller or larger than `X`)
+- The counters can be atomically set back to a custom value if a boundary is hit.
+- The counters return their value after the increment operation atomically while still in a write context (this mean we can read counters atomically by incrementing them by 0, without forcing a read lock!)
 
-The caller is whoever wants to acquire (or release) resources. The manager is in
-charge of starting an ETS table, and will track callers in case they fail. The
-ETS table will hold the lock state itself.
+With these primitives only, it becomes possible to write a user-land mutex. So if I want to have a mutex allowing 5 locks to be acquired, I start with a counter set to 0. I can then do as follows:
 
-The lock mechanism itself is based on a series of sub-locks, or buckets. If I
-have 3 resources each with a potential 50 acquisitions, the lock for my app will
-be of the form
+- Update the counter by `+1` with a limit of `6`. The value returned is `1`, so I've acquired my lock.
+- Update the counter similarly 4 more times, such that the last value returned is `5`, and all locks are acquired.
+- Whenever the counter reaches `6`, it is full and my request has failed.
 
-    {{Key,1}, 0..51}
-    {{Key,2}, 0..51}
-    {{Key,3}, 0..51}
+To release a lock, just decrement the counter with a floor value set to `0`. If I have lock `1` and decrement by `1`, the counter is back at 0 and we're fine. Now there's a fun problem here: Because our atomicicity constraint limits us to writing before we read anything, and because between those two writes anyone else can touch the value, there's no good way to react when we decrement the counter and see the value `5` being returned. This means we just decremented a null lock, from 6 to 5, and the next person to lock will hit 6 again!
 
-Where 51 is a ceiling value of `$LIMIT+1` meaning "the lock is full".
+There's a conundrum for you. The correct way to fix this one given our constraints is that whenever we hit `5`, we try to unlock a second time (so that `6 --> 4`, freeing the lock we had acquired properly). But it's possible that in between these two operations, someone else attempts to acquire the lock! Whoops.
+
+We enter a potential infinite livelock where the operation order is:
+
+- A tries to unlock
+- B tries to lock
+- A tries to unlock
+- B tries to lock
+- ...
+
+If any unlock sequence can manage to do its thing twice in a row, we'll be fine, but there's no guarantee this will ever happen!
+
+This leaves us oscillating between 5 and 6 nearly indefinitely. So what we do is add a *liveliness* constraint to the problem. We say that when we try the above more than say, 10 times unsuccessfully, we say "forget it" and decrement by `2`. This has the nice effect of never livelocking, but the nefarious effect of sometimes leaking a request:
+
+- A tries to unlock
+- B tries to lock
+- A tries to unlock
+- B tries to lock
+- ...
+- A tries to unlock
+- A forces a double-unlock
+- B succeeds in locking
+- C succeeds ing locking
+
+The compromise being that we're happier with a few rare request leaks than a few rare livelocks[4]
+
+What we built on these foundations was a simple prototype that showed very good performance, entirely satisfactory. But this would have been too easy if it had worked right out of the box.
+### My locks keep being resized
+
+One of the very tricky aspects of locking dynos is that numbers of dynos isn't fixed. This means that at any given time, the lock itself may need to be made larger or truncated!
+
+To see how this happens, let's imagine the following scenario, where 6 requests in their own processes (A, B, C, D, and E, started in that order) try to lock the same application. The router allows only 3 locks per dyno, and the app has 1 dyno.
+
+At the time A and B were started, `3` locks at most were allowed. Concurrently, the user boots a dyno, so by the time C and D get started, 6 locks were made available in total. Then the user scales down, and only 3 locks are available again.
+
+If A, and B can finish before the scaling event happens, and that C and D are started after scaling up and finish before we scale down, and that E is starting after the scaling down is complete, we're fine:
+
+    A ---> lock [max:3] ----> unlock
+    B -----> lock [max:3] ------> unlock
+    C ---------------------> lock [max: 6] -----> unlock
+    D -----------------------> lock [max: 6] -----> unlock
+    E ---------------------------------------> lock [max: 3] -----> unlock
+
+This gives us an interleaving where the following locks are owned or active at each request:
+
+    A: 1
+    B: 2
+    C: 3
+    D: 4
+    E: 3
+
+Which works fine. But if we imagine a more compact timeline, we could very well end up with:
+
+    A -----------> lock [max:3] -------------> ...
+    B ------> lock [max:3] --------------------------> ...
+    C -----------> lock [max:6] ---------> ...
+    D ----------------> lock [max:6] --------------------------> ...
+    E -------------> lock [max:3] ---------------------> ...
+
+For the following lock values:
+
+    A: 2
+    B: 1
+    C: 3
+    D: 5
+    E: 4 (blocked)
+
+And all of a sudden, we're stuck with 5 locks, with only 4 of them actually acquired! Instead of leaking requests through, we're leaking locks through. This means that under a system with these properties, individual apps would eventually become unable to acquire any resource! The problem is that a single counter like that is not amenable to being resized safely, because we use an overflow value (`Limit+1`) to know when it's full. D'oh!
+
+### Enter Canal Lock
+
+Canal lock is the next level to make this work. The gotcha at the core of canal lock is that there is no reason for us to have only one counter per application if the counter value is per-dyno. We can just go back to a per-dyno counter (without a queue!) and iterate through them. So rather than having 3 locks available and then 6 within the same counter, we start a second counter for the app. So for one dyno I have a single `[3]` counter. For two dynos, I have `[3,3]`, for three dynos, `[3,3,3]`, and so on.
+
+What we do then is to try to lock each single counter in order, starting from the first one:
+
+    [0,0,0] 0 locks
+    [1,0,0] 1 lock
+    [2,0,0] 2 locks
+    [3,0,0] 3 locks
+    [4,0,0] (try again)
+    [4,1,0] 4 locks
+    [4,2,0] 5 locks
+    [4,3,0] 6 locks
+    [4,4,0] (try again)
+    [4,4,1] 7 locks
+    ...
+
+And so on. Each of these locks is like an individual one.
+
+To decrement them, we do the opposite:
+
+    [4,4,1]  7 locks
+    [4,4,0]  6 locks
+    [4,3,-1] (put the value back at 0)
+    [4,3,0]  (unlock again)
+    [4,2,0]  5 locks
+    [4,1,0]  4 locks
+    [4,0,0]  3 locks
+    [3,-1,0] (put the value back at 0)
+    [3,0,0]  (unlock again)
+    [2,0,0]  2 locks
+    [1,0,0]  1 lock
+    [0,0,0]  0 locks
+
+So rather than having a `O(1)` algorithm, we end up with `O(n)` where `n` is the number of dynos, but unless someone has millions of dynos (which just doesn't happen), the lock mechanism should be very fast.
+
+For the earlier case of A, B, C, D, and E with maximal interleaving, we now see:
+
+    A: 2
+    B: 1
+    C: 3
+    D: 4,1
+    E: 4 (blocked)
+
+What's interesting about this one is that we properly respect the number of locks registered to the number of locks acquired, and that even though locks are acquired in any order, they get accepted or denied based on how many resources *each request* thinks it should respect. This means that no matter what the interleaving is, requests spawned at a time where many dynos were available will be able to act as such, and peacefully coexist with requests created when fewer dynos existed. This means that we maintain both the global lock constraints while maintaining each requests' own local view of what they should be able to use.
+
+## Algorithm (in practice)
 
 ### Starting the system
 
