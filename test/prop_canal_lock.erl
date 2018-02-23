@@ -1,32 +1,25 @@
--module(canal_lock_prop).
-%-include_lib("proper/include/proper.hrl").
+-module(prop_canal_lock).
+-include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-%-define(PROPMOD, proper).
-%-define(PROP(A), {timeout, 120, ?_assert(?PROPMOD:quickcheck(A(), [100]))}).
-%
-%proper_test_() ->
-%    {"Run all property-based tests",
-%        [?PROP(prop_lock_unlock)]}.
-%
-%prop_lock_unlock() ->
-%    ?FORALL({Mod,Num,Keys}, {max_per(), num_resources(), unique_keys()},
-%        begin
-%            start(Mod),
-%            Max = Mod*Num,
-%            Runs = lists:seq(1,Max),
-%            Locks = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys, _ <- Runs],
-%            ReLocks1 = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys],
-%            Unlocks = [canal_lock:release(Key, Mod, Num) || Key <- Keys, _ <- Runs],
-%            ReLocks2 = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys],
-%            lists:all(fun is_acquired/1, Locks)
-%            andalso
-%            lists:all(fun is_full/1, ReLocks1)
-%            andalso
-%            lists:all(fun is_ok/1, Unlocks)
-%            andalso
-%            lists:all(fun is_acquired/1, ReLocks2)
-%        end).
+prop_lock_unlock() ->
+    ?FORALL({Mod,Num,Keys}, {max_per(), num_resources(), unique_keys()},
+        begin
+            start(Mod),
+            Max = Mod*Num,
+            Runs = lists:seq(1,Max),
+            Locks = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys, _ <- Runs],
+            ReLocks1 = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys],
+            Unlocks = [canal_lock:release(Key, Mod, Num) || Key <- Keys, _ <- Runs],
+            ReLocks2 = [canal_lock:acquire(Key, Mod, Num) || Key <- Keys],
+            lists:all(fun is_acquired/1, Locks)
+            andalso
+            lists:all(fun is_full/1, ReLocks1)
+            andalso
+            lists:all(fun is_ok/1, Unlocks)
+            andalso
+            lists:all(fun is_acquired/1, ReLocks2)
+        end).
 
 downsize_release_test() ->
     start(5),
@@ -186,12 +179,12 @@ show_table() ->
 %    ?debugVal(Tab2),
     ?debugVal(Tab).
 
-%key() -> integer().
-%keys() -> non_empty(list(key())).
-%unique_keys() -> ?LET(K, keys(), sets:to_list(sets:from_list(K))).
-%
-%num_resources() -> ?SUCHTHAT(X, pos_integer(), X > 1 andalso X < 100).
-%max_per() -> ?SUCHTHAT(X, pos_integer(), X > 1 andalso X < 200).
+key() -> integer().
+keys() -> non_empty(list(key())).
+unique_keys() -> ?LET(K, keys(), sets:to_list(sets:from_list(K))).
+
+num_resources() -> ?SUCHTHAT(X, pos_integer(), X > 1 andalso X < 100).
+max_per() -> ?SUCHTHAT(X, pos_integer(), X > 1 andalso X < 200).
 
 start(MaxPer) ->
     case whereis(canal_lock) of
@@ -255,8 +248,8 @@ until_acquired(Key, Max, Num, Time) ->
 is_acquired({acquired,_}) -> true;
 is_acquired(_) -> false.
 
-%is_full(full) -> true;
-%is_full(_) -> false.
-%
-%is_ok(ok) -> true;
-%is_ok(_) -> false.
+is_full(full) -> true;
+is_full(_) -> false.
+
+is_ok(ok) -> true;
+is_ok(_) -> false.
