@@ -1,5 +1,5 @@
 {application, canal_lock,
  [{description, "ETS-based lock manager for concurrently variable resource numbers"},
-  {vsn, "1.0.0"},
+  {vsn, "1.1.0"},
   {registered, []},
   {applications, [kernel, stdlib]}]}.
